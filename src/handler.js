@@ -1,59 +1,103 @@
-import { userState } from './userState.js';
-import { handleCallButton } from './features/callButton.js';
-import { handleUrlButton } from './features/urlButton.js';
-import { handleQuickReplyButton } from './features/quickReplyButton.js';
-import { handleCopyButton } from './features/copyButton.js';
+import { userState } from './userState.js'
+import { handleCallButton } from './features/callButton.js'
+import { handleUrlButton } from './features/urlButton.js'
+import { handleQuickReplyButton } from './features/quickReplyButton.js'
+import { handleCopyButton } from './features/copyButton.js'
+
+// ================================
+// Anti-Duplicate System
+// ================================
+const processed = new Set()
 
 export async function handler(sock, msg) {
-  if (!msg?.message) return;
-  const from = msg.key.remoteJid;
-  const state = userState.get(from) || { step: 'start' };
+  if (!msg?.message) return
 
-  let rowId;
+  const msgId = msg.key?.id
+  if (!msgId) return
+
+  // منع التكرار
+  if (processed.has(msgId)) return
+  processed.add(msgId)
+
+  setTimeout(() => processed.delete(msgId), 60_000)
+
+  const from = msg.key.remoteJid
+  const state = userState.get(from) || { step: 'start' }
+
+  let actionId = null
+
   try {
-    if (msg.message?.interactiveResponseMessage?.nativeFlowResponseMessage) {
-      rowId = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson).id;
-    } else if (msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId) {
-      rowId = msg.message.listResponseMessage.singleSelectReply.selectedRowId;
+    // Native Flow (Interactive List)
+    if (
+      msg.message?.interactiveResponseMessage
+        ?.nativeFlowResponseMessage?.paramsJson
+    ) {
+      const parsed = JSON.parse(
+        msg.message.interactiveResponseMessage
+          .nativeFlowResponseMessage.paramsJson
+      )
+      actionId = parsed.id
     }
-  } catch {}
 
-  const btnId = msg.message?.buttonsResponseMessage?.selectedButtonId;
+    // Normal List
+    else if (
+      msg.message?.listResponseMessage
+        ?.singleSelectReply?.selectedRowId
+    ) {
+      actionId =
+        msg.message.listResponseMessage.singleSelectReply.selectedRowId
+    }
 
-  if (rowId) {
-    switch (rowId) {
+    // Old Buttons
+    else if (
+      msg.message?.buttonsResponseMessage?.selectedButtonId
+    ) {
+      actionId =
+        msg.message.buttonsResponseMessage.selectedButtonId
+    }
+  } catch (err) {
+    console.error('❌ Parse error:', err)
+  }
+
+  // ================================
+  // Handle Actions
+  // ================================
+  if (actionId) {
+    switch (actionId) {
       case 'call':
-        await handleCallButton(sock, from);
-        break;
+        await handleCallButton(sock, from)
+        break
+
       case 'url':
-        await handleUrlButton(sock, from);
-        break;
+        await handleUrlButton(sock, from)
+        break
+
       case 'quick':
-        await handleQuickReplyButton(sock, from);
-        break;
+        await handleQuickReplyButton(sock, from)
+        break
+
       case 'copy':
-        await handleCopyButton(sock, from);
-        break;
+        await handleCopyButton(sock, from)
+        break
     }
-    return;
+    return
   }
 
-/*  if (btnId === 'quick_reply_demo') {
-    await sock.sendMessage(from, { text: 'Ini contoh quick reply' });
-    return;
-  }
-*/
-
+  // ================================
+  // Initial Menu
+  // ================================
   if (state.step === 'start' || state.step === 'menuMain') {
-    await sendIntroMenu(sock, from);
-    userState.set(from, { step: 'menuMain' });
+    await sendIntroMenu(sock, from)
+    userState.set(from, { step: 'menuMain' })
   }
 }
 
+// ================================
+// Menu Sender
+// ================================
 async function sendIntroMenu(sock, from) {
   await sock.sendMessage(from, {
     text: '🤖 Hello!\nChoose an option from the menu below:',
-    subtitle: 'All Button Showcase',
     footer: '© Atex Ovi 2025 — MIT License',
     interactiveButtons: [
       {
@@ -67,12 +111,12 @@ async function sendIntroMenu(sock, from) {
                 { title: 'Call Button', description: 'Example: Call Button', id: 'call' },
                 { title: 'URL Button', description: 'Example: URL Button', id: 'url' },
                 { title: 'Quick Reply Button', description: 'Example: Quick Reply Button', id: 'quick' },
-                { title: 'Copy Button', description: 'Example: Copy Button', id: 'copy' },
-              ],
-            },
-          ],
-        }),
-      },
-    ],
-  });
+                { title: 'Copy Button', description: 'Example: Copy Button', id: 'copy' }
+              ]
+            }
+          ]
+        })
+      }
+    ]
+  })
 }
