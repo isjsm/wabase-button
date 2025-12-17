@@ -1,119 +1,109 @@
 #!/usr/bin/env node
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason
+} from '@whiskeysockets/baileys'
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from 'atexovi-baileys'
 import pino from 'pino'
 import fs from 'fs'
 import path from 'path'
-import inquirer from 'inquirer'
 import chalk from 'chalk'
 import figlet from 'figlet'
 import dotenv from 'dotenv'
+import inquirer from 'inquirer'
+import { fileURLToPath } from 'url'
 import { handler } from './src/handler.js'
 
-dotenv.config({ debug: false })
+dotenv.config()
 
-/* ===============================
-   FILTER NOISE (Bad MAC, Signal)
-================================ */
-const originalError = console.error
-const originalLog = console.log
-const originalStdoutWrite = process.stdout.write
-
-const FILTER_PATTERNS = [
-  'Bad MAC',
-  'Failed to decrypt message',
-  'Session error',
-  'Closing open session',
-  'Signal',
-  'registrationId',
-  'currentRatchet',
-  'chainKey',
-  'messageKeys',
-]
-
-process.stdout.write = function (chunk, encoding, callback) {
-  const str = chunk?.toString() || ''
-  if (FILTER_PATTERNS.some(p => str.includes(p))) {
-    if (typeof callback === 'function') callback()
-    return true
-  }
-  return originalStdoutWrite.call(this, chunk, encoding, callback)
-}
-
-console.error = function (...args) {
-  const msg = args.join(' ')
-  if (FILTER_PATTERNS.some(p => msg.includes(p))) return
-  originalError.apply(console, args)
-}
-
-console.log = function (...args) {
-  const msg = args.join(' ')
-  if (FILTER_PATTERNS.some(p => msg.includes(p))) return
-  originalLog.apply(console, args)
-}
-
-/* ===============================
-   BANNER
-================================ */
-function centerText(text) {
-  const width = process.stdout.columns || 80
-  return text
-    .split('\n')
-    .map(line => ' '.repeat(Math.max(0, (width - line.length) / 2)) + line)
-    .join('\n')
-}
+/* ===================== */
+/* Utils                 */
+/* ===================== */
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const SESSION_DIR = path.join(__dirname, 'session')
 
 function showBanner() {
   console.clear()
-  const banner = figlet.textSync('Wabase Bot', { font: 'Slant' })
-  console.log(chalk.cyanBright(centerText(banner)))
-  console.log(chalk.greenBright(centerText('Interactive WhatsApp Bot')))
-  console.log(chalk.gray(centerText('────────────────────────────')) + '\n')
+  const banner = figlet.textSync('Wabase Button', { font: 'Slant' })
+  console.log(chalk.cyan(banner))
+  console.log(chalk.gray('────────────────────────────────────'))
+  console.log(chalk.green(' WhatsApp Multi-Device Button Bot '))
+  console.log(chalk.gray('────────────────────────────────────\n'))
 }
 
-/* ===============================
-   BOT START
-================================ */
-const authDir = path.join(process.cwd(), 'session')
-
+/* ===================== */
+/* Main                  */
+/* ===================== */
 async function startBot() {
   showBanner()
 
-  const { state, saveCreds } = await useMultiFileAuthState(authDir)
+  if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR)
+
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
+    browser: ['Wabase', 'Chrome', '1.0.0']
   })
 
-  /* ===== CONNECTION ===== */
-  sock.ev.on('connection.update', (update) => {
+  /* ===================== */
+  /* Connection Updates    */
+  /* ===================== */
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update
 
+    if (connection === 'connecting') {
+      console.log(chalk.yellow('🔄 Connecting to WhatsApp...'))
+    }
+
     if (connection === 'open') {
-      console.log(chalk.greenBright('✅ Connected to WhatsApp'))
-      console.log(chalk.cyan('👤 User:'), sock.user?.id)
+      console.log(chalk.green('✅ Connected to WhatsApp'))
+      console.log(chalk.cyan(`👤 User: ${sock.user?.id}`))
+
+      if (!state.creds.registered) {
+        const { number } = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'number',
+            message: '📱 Enter WhatsApp number (without +):',
+            validate: n => /^\d{8,}$/.test(n) || 'Invalid number'
+          }
+        ])
+
+        const cleanNumber = number.replace(/\D/g, '')
+        const code = await sock.requestPairingCode(cleanNumber)
+
+        console.log('\n' + chalk.green('🔗 Pairing Code:'))
+        console.log(chalk.bold.yellow(code))
+        console.log(chalk.gray('\nOpen WhatsApp → Linked Devices → Link a Device\n'))
+      }
     }
 
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
+      const reconnect = reason !== DisconnectReason.loggedOut
 
-      if (reason === DisconnectReason.loggedOut) {
-        console.log(chalk.red('❌ Logged out. Delete session folder and restart.'))
-        process.exit(1)
+      console.log(
+        chalk.red('❌ Connection closed'),
+        reconnect ? chalk.yellow('— Reconnecting...') : ''
+      )
+
+      if (reconnect) {
+        setTimeout(startBot, 3000)
+      } else {
+        console.log(chalk.red('🧹 Session expired. Delete session folder and restart.'))
       }
-
-      console.log(chalk.yellow('🔁 Connection closed. Waiting for auto reconnect...'))
-      // ❌ لا تعيد startBot()
     }
   })
 
-  sock.ev.on('creds.update', saveCreds)
-
-  /* ===== MESSAGE HANDLER ===== */
-  sock.ev.on('messages.upsert', async (m) => {
-    const msg = m.messages?.[0]
+  /* ===================== */
+  /* Messages              */
+  /* ===================== */
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const msg = messages[0]
     if (!msg || msg.key.fromMe) return
 
     try {
@@ -123,22 +113,7 @@ async function startBot() {
     }
   })
 
-  /* ===== PAIRING CODE ===== */
-  if (!fs.existsSync(authDir) || fs.readdirSync(authDir).length === 0) {
-    const { waNumber } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'waNumber',
-        message: chalk.cyan('📱 Enter WhatsApp number (without +):'),
-        validate: v => /^\d{8,}$/.test(v) || 'Invalid number',
-      },
-    ])
-
-    const code = await sock.requestPairingCode(waNumber)
-    console.log(chalk.greenBright('\n✅ Pairing Code:'))
-    console.log(chalk.magentaBright(code))
-    console.log(chalk.gray('\nWhatsApp → Linked Devices → Link a Device\n'))
-  }
+  sock.ev.on('creds.update', saveCreds)
 }
 
 startBot()
